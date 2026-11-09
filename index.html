@@ -1163,30 +1163,35 @@ function cleanMember(m) {
   o.updatedAt = new Date().toISOString(); return o;
 }
 async function initStore() {
-  let db = null, dl = null;
-  try { if (window.claude && window.claude.use) [db, dl] = await Promise.all([window.claude.use("db"), window.claude.use("downloads")]); } catch (e) { db = null; }
-  S.dl = dl; updateDlButtons();
-  if (db) {
-    S.db = db; S.mode = "db";
-    db.collection("members").onSnapshot(snap => {
-      const m = new Map(); snap.docs.forEach(d => m.set(d.id, { ...d.data(), id: d.id }));
-      S.members = m; S.loaded = true; changed();
-    }, err => { toast("Mất kết nối tới dữ liệu chung (" + err.code + "). Tải lại trang để kết nối lại.", 8000); });
-    db.doc("giapha/config").onSnapshot(s => { S.cfg = { ...DEFAULT_CFG, ...(s.exists ? s.data() : {}) }; changed(true); }, () => {});
-  } else {
-    S.mode = "local";
-    try { const j = JSON.parse(lsGet(LS_KEY) || "null"); if (j) { (j.members || []).forEach(m => S.members.set(m.id, m)); S.cfg = { ...DEFAULT_CFG, ...(j.config || {}) }; } } catch (e) {}
-    S.loaded = true; changed(true);
-    renderPubBar();
-  }
-  renderChip();
+  S.dl = {
+    save: async ({ filename, data }) => {
+      const blob = data instanceof Blob ? data : new Blob([data], { type: typeof data === "string" ? "application/json" : "application/octet-stream" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); return true;
+    }
+  };
+  updateDlButtons();
+  S.mode = "local";
+  loadLocalData();
+  S.loaded = true; changed(true);
+  renderPubBar(); renderChip();
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+  window.addEventListener("storage", ev => { if (ev.key === LS_KEY) { loadLocalData(); changed(true); } });
+}
+function loadLocalData() {
+  try {
+    const j = JSON.parse(lsGet(LS_KEY) || "null");
+    S.members = new Map();
+    S.cfg = { ...DEFAULT_CFG };
+    if (j) { (j.members || []).forEach(m => S.members.set(m.id, m)); S.cfg = { ...DEFAULT_CFG, ...(j.config || {}) }; }
+  } catch (e) {}
 }
 // signed-out visitors have no shared database: offer the public copy published with the page
 const PUB_URL = "public/giapha.json";
 function renderPubBar() {
   const b = $("#pubBar"); if (!b) return;
-  document.body.classList.toggle("no-db", S.mode !== "db");
-  if (S.mode === "db") { b.hidden = true; return; }
+  document.body.classList.toggle("no-db", S.mode !== "db" && S.mode !== "local");
+  if (S.mode === "db" || S.mode === "local") { b.hidden = true; return; }
   b.hidden = false;
   if (S.mode === "snapshot") {
     const at = S.pubAt ? new Date(S.pubAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", year: "numeric" }) : "";
@@ -1216,7 +1221,11 @@ async function loadPublic() {
   }
 }
 const pubDeny = () => { toast("Bản công khai chỉ để xem. Đăng nhập Claude rồi mở lại link để chỉnh sửa.", 6000); return false; };
-function persistLocal() { if (S.mode === "local") lsSet(LS_KEY, JSON.stringify({ members: [...S.members.values()], config: S.cfg })); }
+function persistLocal() {
+  if (S.mode !== "local") return true;
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ members: [...S.members.values()], config: S.cfg })); return true; }
+  catch (e) { toast("Không lưu được vào trình duyệt (bộ nhớ đầy hoặc bị chặn). Hãy tải bản sao lưu JSON và giảm bớt ảnh.", 9000); return false; }
+}
 function renderChip() {
   const c = $("#storeChip"); if (!c) return;
   if (S.mode === "snapshot") c.innerHTML = "<b>Chỉ xem</b> · bản công khai";
@@ -1844,7 +1853,7 @@ function fontsReady() {
 
 /* ================= export helpers ================= */
 function updateDlButtons() {
-  $$("[data-dl]").forEach(b => { b.disabled = !S.dl; b.title = S.dl ? "" : "Trang đang mở ở chế độ không cho tải tệp về. Mở trang trong Claude để tải."; });
+  $$("[data-dl]").forEach(b => { b.disabled = !S.dl; b.title = S.dl ? "" : "Không tải được tệp."; });
 }
 async function offerFile(filename, data) {
   if (!S.dl) { toast("Chế độ xem này không cho tải tệp về."); return false; }
@@ -2581,7 +2590,7 @@ function ocrClick(e) {
 }
 async function ocrRead() {
   const s = await getSample();
-  if (!s) { OCR.err = "Tính năng đọc ảnh cần mở trang trong Claude khi đã đăng nhập."; ocrRender(); return; }
+  if (!s) { OCR.err = "Tính năng đọc ảnh bằng AI cần chạy trong Claude, không dùng được khi mở file trên máy/local."; ocrRender(); return; }
   const known = [...S.members.values()].filter(m => m.line !== "inlaw").sort((a, b) => (a.gen || 0) - (b.gen || 0)).slice(0, 250).map(m => `${tcase(m.name)} (đời ${m.gen || "?"}${m.birthYear ? ", sinh " + m.birthYear : ""})`).join("; ");
   const prompt = `Các ảnh đính kèm chụp tài liệu gia phả của một dòng họ Việt Nam (trang sổ, danh sách viết tay hoặc đánh máy, bảng tính, hoặc sơ đồ cây).
 Hãy đọc và liệt kê MỌI người có tên trong ảnh. Giữ đúng dấu tiếng Việt của tên. Không bịa thông tin không có trong ảnh; ô nào không thấy thì để chuỗi rỗng.
